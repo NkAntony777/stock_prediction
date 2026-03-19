@@ -23,7 +23,7 @@ def write_failed_score() -> None:
 
 def is_valid_prediction(prediction_data):
     """
-    验证选手输出的结果是否合法：需要包含最多五支股票，并且权重之和为1.
+    验证选手输出的结果是否合法：需要包含最多五支股票，并且权重之和0到1之间.
     """
     id_col = 'stock_id' if 'stock_id' in prediction_data.columns else '股票代码' if '股票代码' in prediction_data.columns else None
     weight_col = 'weight' if 'weight' in prediction_data.columns else '权重' if '权重' in prediction_data.columns else None
@@ -34,8 +34,8 @@ def is_valid_prediction(prediction_data):
         raise ValueError('预测结果不合法：最多只能包含五支股票。')
 
     weight_sum = prediction_data[weight_col].sum()
-    if abs(float(weight_sum) - 1.0) > 1e-6:
-        raise ValueError(f"预测结果不合法：权重之和必须为1. 当前权重之和为 {weight_sum}.")
+    if not (0 <= float(weight_sum) <= 1.0):
+        raise ValueError(f"预测结果不合法：权重之和必须为0到1之间. 当前权重之和为 {weight_sum}.")
 
 
 def calculate_return(group):
@@ -56,26 +56,6 @@ def calculate_predict_weight_score(output_data, test_data):
     # 计算加权收益率
     final_score = (result['收益率'] * result['权重']).sum()
     return final_score
-
-
-def calculate_optimal_score(test_data):
-    # 计算每只股票的收益率
-    group = test_data.groupby('股票代码').tail(5).groupby('股票代码')
-    result = group.apply(calculate_return).reset_index().rename(columns={0: '收益率'})
-    # 选择收益率最高的5只股票
-    top_stocks = result.nlargest(5, '收益率')
-    # 计算最优加权收益率
-    optimal_score = (top_stocks['收益率'] * 0.2).sum()
-    return optimal_score
-
-
-def calculate_average_score(test_data):
-    # 计算每只股票的收益率
-    group = test_data.groupby('股票代码').tail(5).groupby('股票代码')
-    result = group.apply(calculate_return).reset_index().rename(columns={0: '收益率'})
-    # 计算平均收益率
-    average_score = result['收益率'].mean()
-    return average_score
 
 
 # 读取测试数据

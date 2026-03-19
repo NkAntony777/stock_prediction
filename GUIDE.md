@@ -29,7 +29,7 @@ windows
 start_date = "***"
 end_date = "***"
 ```
-运行`python get_stock_data.py`即可下载所需时间段的数据，默认保存为data/stock_data.csv
+建议先将现有数据删除后，再运行`python get_stock_data.py`，即可下载所需时间段的数据，默认保存为data/stock_data.csv
 
 （如果出现网络问题，请关闭代理重试，多尝试几次）
 
@@ -104,7 +104,7 @@ windows可以直接运行`python code/src/predict.py`
 
 2. 对打包后的docker进行完整运行验证
 
-在这一步，选手需要按照打包docker的流程先将项目打包为一个镜像（对应上面的docker镜像创建），暂时不用导出会.tar文件
+在这一步，选手需要按照打包docker的流程先将项目打包为一个镜像（对应上面的docker镜像创建），暂时不用导出为.tar文件
 
 然后在根目录下运行`docker compose up`。这一步会对打包成的docker是否可运行进行验证，如果运行后在test/output中得到result.csv，验证即成功。
 
