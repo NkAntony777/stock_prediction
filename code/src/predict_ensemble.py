@@ -184,8 +184,9 @@ def main():
     # ── 集成融合 ──
     # 权重参考 Optiver 冠军: 0.5 CatBoost + 0.3 GRU + 0.2 Transformer
     # 根据验证集 final_score 调整: Transformer(0.069) > CatBoost(0.010) > LGB(-0.006)
-    # 保守权重: Trans 0.6, Cat 0.25, LGB 0.15
-    w_trans, w_cat, w_lgb = 0.5, 0.25, 0.25
+    # 动态权重 (基于验证集回测: CatBoost 最强，Trans 次之)
+    # CatBoost 准确识别了 +28% 收益的龙头股
+    w_trans, w_cat, w_lgb = 0.4, 0.6, 0.0  # 暂弃 LGB (LambdaRank 不泛化)
 
     # 构建分数 dict
     score_dict = {}

@@ -17,11 +17,45 @@ from train import (
 warnings.filterwarnings('ignore')
 
 # ── 数据准备（复用 baseline 的预处理流程） ──
+def split_with_embargo(df, sequence_length, embargo_days=5):
+    """
+    Purged K-Fold 风格的训练/验证集切分。
+    在训练/验证边界插入 embargo 期，防止序列相关性泄露。
+    """
+    df = df.copy()
+    df['日期'] = pd.to_datetime(df['日期'])
+    df = df.sort_values(['日期', '股票代码']).reset_index(drop=True)
+
+    last_date = df['日期'].max()
+    val_start = (last_date - pd.DateOffset(months=2)).normalize()
+
+    # Embargo: 验证集起始日前推 embargo_days 个交易日作为训练截止
+    # 避免因相邻日序列相关性导致的信息泄露
+    val_dates = sorted(df['日期'].unique())
+    val_dates_series = pd.Series(val_dates)
+    embargo_start = val_start - pd.tseries.offsets.BDay(embargo_days)
+
+    # 验证集需要前 sequence_length-1 个交易日作为序列上下文
+    val_context_start = val_start - pd.tseries.offsets.BDay(sequence_length - 1)
+
+    train_df = df[df['日期'] < embargo_start].copy()
+    val_df = df[df['日期'] >= val_context_start].copy()
+
+    print(f"全量数据范围: {df['日期'].min().date()} 到 {last_date.date()}")
+    print(f"训练集截止: {train_df['日期'].max().date()} | 验证集起始: {val_start.date()}")
+    print(f"Embargo 期: {(pd.to_datetime(train_df['日期'].max()) + pd.Timedelta(days=1)).date()} ~ {(pd.to_datetime(val_start) - pd.Timedelta(days=1)).date()}")
+    print(f"验证集实际取数范围(含序列上下文): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}")
+
+    train_df['日期'] = train_df['日期'].dt.strftime('%Y-%m-%d')
+    val_df['日期'] = val_df['日期'].dt.strftime('%Y-%m-%d')
+    return train_df, val_df, val_start
+
+
 def prepare_data():
     """加载数据，做特征工程，返回训练/验证集（DataFrame格式，不做序列化）"""
     data_file = os.path.join(config['data_path'], 'train.csv')
     full_df = pd.read_csv(data_file)
-    train_df, val_df, val_start = split_train_val_by_last_month(full_df, config['sequence_length'])
+    train_df, val_df, val_start = split_with_embargo(full_df, config['sequence_length'], embargo_days=5)
 
     all_stock_ids = full_df['股票代码'].unique()
     stockid2idx = {sid: idx for idx, sid in enumerate(sorted(all_stock_ids))}
@@ -88,9 +122,8 @@ def train_lightgbm(train_df, val_df, features, output_dir):
     X_val = val_df[features].values.astype(np.float32)
     y_val = val_df['label'].values.astype(np.float32)
 
-    print(f"LightGBM: train={X_train.shape[0]} samples, val={X_val.shape[0]} samples")
-
-    # 回归目标：直接预测收益率，排序靠 predict 值大小决定
+    # 回归目标（RMSE）：LambdaRank 在验证集上提升但测试集不泛化
+    # 保留 embargo 切分防泄露
     lgb_train = lgb.Dataset(X_train, y_train)
     lgb_val = lgb.Dataset(X_val, y_val, reference=lgb_train)
 
@@ -122,6 +155,9 @@ def train_lightgbm(train_df, val_df, features, output_dir):
             lgb.log_evaluation(period=50),
         ],
     )
+
+    # LambdaRank 预测的是 relevance score (float)，可以直接排序
+    # _eval_top5 中使用 argsort 即可
 
     model_path = os.path.join(output_dir, 'lgb_model.txt')
     model.save_model(model_path)
