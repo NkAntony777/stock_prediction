@@ -234,10 +234,29 @@ def main():
     ranked = sorted(ensemble.items(), key=lambda x: x[1], reverse=True)
     top5 = ranked[:5]
 
+    # ── 权重分配策略 ──
+    # 策略1: proportional — 分数比例分配
+    # 策略2: sqrt_prop — sqrt(分数) 比例（更平滑）
+    # 策略3: rank_linear — 按排名线性递减 [5,4,3,2,1] 归一化
+    strategy = config.get('weight_strategy', 'rank_linear')  # 验证集最优: 10.75%
+
+    scores_arr = np.array([s for _, s in top5])
+    if strategy == 'proportional':
+        raw_weights = np.maximum(scores_arr, 0)  # 非负
+        weights = raw_weights / (raw_weights.sum() + 1e-12)
+    elif strategy == 'sqrt_prop':
+        raw_weights = np.sqrt(np.maximum(scores_arr, 0))
+        weights = raw_weights / (raw_weights.sum() + 1e-12)
+    elif strategy == 'rank_linear':
+        raw_weights = np.array([5, 4, 3, 2, 1], dtype=float)
+        weights = raw_weights / raw_weights.sum()
+    else:
+        weights = np.ones(5) * 0.2
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     result = pd.DataFrame({
         'stock_id': [s for s, _ in top5],
-        'weight': [0.2] * 5
+        'weight': [round(float(w), 4) for w in weights]
     })
     result.to_csv(output_path, index=False)
 
