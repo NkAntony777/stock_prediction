@@ -20,4 +20,5 @@ config = {
 
     'output_dir': f'./model/{sequence_length}_{feature_num}',
     'data_path': './data',
+    'use_selected_features': False,  # 金融ML中特征筛选易丢信号，保持全量
 }

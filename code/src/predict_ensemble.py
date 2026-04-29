@@ -167,26 +167,55 @@ def main():
 
     # ── 模型2: LightGBM ──
     print("\n=== LightGBM 预测 ===")
+    # 检查是否使用精选特征
+    selected_path = os.path.join(model_dir, 'selected_features.json')
+    if os.path.exists(selected_path):
+        with open(selected_path) as f:
+            gbdt_feat_cols_used = json.load(f)
+        print(f"  使用精选特征: {len(gbdt_feat_cols_used)} 个")
+    else:
+        gbdt_feat_cols_used = gbdt_feat_cols
+
     scaler_g = joblib.load(scaler_gbdt_path)
     data_g = data.copy()
-    data_g[gbdt_feat_cols] = scaler_g.transform(data_g[gbdt_feat_cols])
+    data_g[gbdt_feat_cols_used] = scaler_g.transform(data_g[gbdt_feat_cols_used])
     import lightgbm as lgbm
     lgb = lgbm.Booster(model_file=lgb_path)
-    l_stocks, l_scores = get_gbdt_scores(data_g, gbdt_feat_cols, lgb, stock_ids)
+    l_stocks, l_scores = get_gbdt_scores(data_g, gbdt_feat_cols_used, lgb, stock_ids)
 
     # ── 模型3: CatBoost ──
     print("\n=== CatBoost 预测 ===")
     from catboost import CatBoost
     cat = CatBoost()
     cat.load_model(cat_path)
-    c_stocks, c_scores = get_gbdt_scores(data_g, gbdt_feat_cols, cat, stock_ids)
+    c_stocks, c_scores = get_gbdt_scores(data_g, gbdt_feat_cols_used, cat, stock_ids)
+
+    # ── 模型4: GRU (可选) ──
+    gru_path = os.path.join(model_dir, 'gru_model.pth')
+    scaler_gru_path = os.path.join(model_dir, 'scaler_gru.pkl')
+    use_gru = os.path.exists(gru_path) and os.path.exists(scaler_gru_path)
+    if use_gru:
+        print("\n=== GRU 预测 ===")
+        from model_gru import StockGRU
+        scaler_gr = joblib.load(scaler_gru_path)
+        # GRU 特征: 不含 instrument (196维，与训练时一致)
+        gru_feats = [c for c in trans_feat_cols if c != 'instrument']
+        data_gr = data.copy()
+        data_gr[gru_feats] = scaler_gr.transform(data_gr[gru_feats])
+        model_gr = StockGRU(input_dim=len(gru_feats), hidden_dim=128, num_layers=2, dropout=0.2)
+        model_gr.load_state_dict(torch.load(gru_path, map_location=device, weights_only=True))
+        model_gr.to(device).eval()
+        g_stocks, g_scores = get_transformer_scores(data_gr, gru_feats, model_gr, scaler_gr, stock_ids, device)
+    else:
+        g_stocks, g_scores = [], np.array([])
 
     # ── 集成融合 ──
-    # 权重参考 Optiver 冠军: 0.5 CatBoost + 0.3 GRU + 0.2 Transformer
-    # 根据验证集 final_score 调整: Transformer(0.069) > CatBoost(0.010) > LGB(-0.006)
-    # 动态权重 (基于验证集回测: CatBoost 最强，Trans 次之)
-    # CatBoost 准确识别了 +28% 收益的龙头股
-    w_trans, w_cat, w_lgb = 0.4, 0.6, 0.0  # 暂弃 LGB (LambdaRank 不泛化)
+    # 四模型加权: Trans + Cat + LGB + GRU
+    # GRU 验证集 final_score=0.124 (最高), Trans=0.069, Cat=0.017
+    if use_gru:
+        w_trans, w_cat, w_lgb, w_gru = 0.25, 0.35, 0.0, 0.4
+    else:
+        w_trans, w_cat, w_lgb = 0.4, 0.6, 0.0
 
     # 构建分数 dict
     score_dict = {}
@@ -196,6 +225,9 @@ def main():
         score_dict.setdefault(s, {})['lgb'] = float(l_scores[i])
     for i, s in enumerate(c_stocks):
         score_dict.setdefault(s, {})['cat'] = float(c_scores[i])
+    if use_gru:
+        for i, s in enumerate(g_stocks):
+            score_dict.setdefault(s, {})['gru'] = float(g_scores[i])
 
     # 归一化各模型分数到 [0,1] 区间后加权
     def norm_scores(d, key):
@@ -213,6 +245,8 @@ def main():
     norm_scores(score_dict, 'trans')
     norm_scores(score_dict, 'lgb')
     norm_scores(score_dict, 'cat')
+    if use_gru:
+        norm_scores(score_dict, 'gru')
 
     # 加权平均
     ensemble = {}
@@ -228,6 +262,9 @@ def main():
         if 'lgb_norm' in v:
             s += w_lgb * v['lgb_norm']
             w += w_lgb
+        if use_gru and 'gru_norm' in v:
+            s += w_gru * v['gru_norm']
+            w += w_gru
         if w > 0:
             ensemble[sid] = s / w
 
