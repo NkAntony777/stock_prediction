@@ -19,3 +19,9 @@ wheels/
 
 *.tar
 
+catboost_info/
+model/*/log/
+temp/
+*.pth
+*.cbm
+*.pkl

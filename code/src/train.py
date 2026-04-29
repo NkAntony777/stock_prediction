@@ -68,7 +68,7 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     if len(groups) == 0:
         raise ValueError(f"{desc}输入为空，无法继续")
 
-    num_processes = min(10, mp.cpu_count())
+    num_processes = min(2, mp.cpu_count())  # 降低进程数，防止OOM
     with mp.Pool(processes=num_processes) as pool:
         processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc=desc))
 
