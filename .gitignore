@@ -22,6 +22,7 @@ wheels/
 catboost_info/
 model/*/log/
 temp/
+logs/
 *.pth
 *.cbm
 *.pkl

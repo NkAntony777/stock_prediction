@@ -1,0 +1,92 @@
+# 修复后的 train_ranking_model 函数（仅修复梯度累积问题）
+# 这是一个独立文件，需要替换原 train.py 中的 train_ranking_model 函数
+
+# 需要修改的行：
+# 1. 第327行: accumulation_loss = 0  →  accumulation_loss = None
+# 2. 第372-376行: 改为直接累积 Tensor，不调用 .item()
+# 3. 第382行: scaler.scale(accumulation_loss * accumulation_steps).backward() → scaler.scale(accumulation_loss).backward()
+# 4. 第404行: accumulation_loss = 0 → accumulation_loss = None
+# 5. 第407-410行: 损失记录部分调整
+# 6. 第423行: if accumulation_loss > 0 → 保持Tensor判断逻辑
+
+# 具体修复内容如下：
+
+"""
+修改 train_ranking_model 函数（约第305-448行）中的以下位置：
+
+位置1 - 第327行附近：
+原代码：
+    # 用于梯度累积
+    accumulation_loss = 0
+    
+改为：
+    # 用于梯度累积
+    accumulation_loss = None
+
+位置2 - 第372-376行附近：
+原代码：
+        # [Phase 1优化] 梯度累积 - 损失累积
+        if accumulation_steps > 1:
+            batch_loss = batch_loss / accumulation_steps
+            accumulation_loss += batch_loss.item()
+        else:
+            accumulation_loss = batch_loss.item()
+            
+改为：
+        # [Phase 1优化] 梯度累积 - 损失累积
+        if accumulation_steps > 1:
+            batch_loss = batch_loss / accumulation_steps
+            if accumulation_loss is None:
+                accumulation_loss = batch_loss
+            else:
+                accumulation_loss = accumulation_loss + batch_loss
+        else:
+            accumulation_loss = batch_loss
+
+位置3 - 第382行：
+原代码：
+                scaler.scale(accumulation_loss * accumulation_steps).backward()
+                
+改为：
+                scaler.scale(accumulation_loss).backward()
+
+位置4 - 第404行附近：
+原代码：
+            optimizer.zero_grad()
+            accumulation_loss = 0
+            
+改为：
+            optimizer.zero_grad()
+            accumulation_loss = None
+
+位置5 - 第407-410行附近：
+原代码：
+        # 记录损失
+        if accumulation_steps > 1:
+            total_loss += accumulation_loss * accumulation_steps
+        else:
+            total_loss += batch_loss.item()
+            
+改为：
+        # 记录损失
+        if accumulation_steps > 1:
+            total_loss += accumulation_loss.item() * accumulation_steps
+        else:
+            total_loss += batch_loss.item()
+
+位置6 - 第423行附近：
+原代码：
+    # 处理最后不足 accumulation_steps 的 batches
+    if accumulation_loss > 0:
+    
+改为：
+    # 处理最后不足 accumulation_steps 的 batches
+    if accumulation_loss is not None:
+
+位置7 - 第425行附近：
+原代码：
+            scaler.scale(accumulation_loss).backward()
+            
+改为：
+            scaler.scale(accumulation_loss).backward()
+"""

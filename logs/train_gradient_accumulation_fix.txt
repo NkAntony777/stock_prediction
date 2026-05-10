@@ -1,0 +1,64 @@
+# 梯度累积修复：将 accumulation_loss 初始化改为 None，保持 Tensor 类型
+# 修改行 327-328
+    # 用于梯度累积 - 修改为 None 和 Tensor
+    accumulation_loss = None
+    
+# 修改行 372-376，梯度累积时保持 Tensor 类型
+        if accumulation_steps > 1:
+            batch_loss = batch_loss / accumulation_steps
+            if accumulation_loss is None:
+                accumulation_loss = batch_loss
+            else:
+                accumulation_loss = accumulation_loss + batch_loss
+        else:
+            accumulation_loss = batch_loss
+
+# 修改行 379-404，修正 scaler.scale 调用
+        if (batch_idx + 1) % accumulation_steps == 0:
+            if scaler is not None:
+                # 使用 GradScaler 进行反向传播 - 直接传入 Tensor
+                scaler.scale(accumulation_loss).backward()
+                
+                # 梯度裁剪
+                if config.get('max_grad_norm', 5.0) > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+                
+                # 更新参数
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # 普通反向传播
+                accumulation_loss.backward()
+                
+                # 梯度裁剪
+                if config.get('max_grad_norm', 5.0) > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+                
+                # 更新参数
+                optimizer.step()
+            
+            optimizer.zero_grad()
+            accumulation_loss = None  # 重置为 None
+        
+        # 记录损失 - 使用 Tensor
+        if accumulation_steps > 1:
+            total_loss += accumulation_loss.detach().item() if accumulation_loss is not None else 0
+        else:
+            total_loss += batch_loss.item()
+
+# 修改行 423-436，修正尾部梯度累积的处理
+    if accumulation_loss is not None:
+        if scaler is not None:
+            scaler.scale(accumulation_loss).backward()
+            if config.get('max_grad_norm', 5.0) > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            accumulation_loss.backward()
+            if config.get('max_grad_norm', 5.0) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+            optimizer.step()
+        optimizer.zero_grad()
