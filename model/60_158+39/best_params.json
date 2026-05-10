@@ -1,0 +1,13 @@
+{
+  "params": {
+    "use_trans": false,
+    "use_cat": true,
+    "use_lgb": false,
+    "use_gru": false,
+    "w_cat": 0.5487337893665861,
+    "weight_strategy": "equal",
+    "top_k": 4,
+    "norm_method": "rank"
+  },
+  "value": 0.010438165017633259
+}

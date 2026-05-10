@@ -86,8 +86,19 @@ def prepare_data():
     val_processed['instrument'] = val_processed['instrument'].astype(np.int64)
     val_processed = _build_label_and_clean(val_processed, drop_small_open=True)
 
-    # 特征列
-    feature_cols = [c for c in feature_cloums_map[config['feature_num']] if c not in ('instrument',)]
+    # 特征列（可选：使用精选特征）
+    use_selected = config.get('use_selected_features', False)
+    if use_selected:
+        selected_path = os.path.join(config['output_dir'], 'selected_features.json')
+        if os.path.exists(selected_path):
+            import json
+            with open(selected_path) as f:
+                feature_cols = json.load(f)
+            print(f"使用精选特征: {len(feature_cols)} 个")
+        else:
+            feature_cols = [c for c in feature_cloums_map[config['feature_num']] if c not in ('instrument',)]
+    else:
+        feature_cols = [c for c in feature_cloums_map[config['feature_num']] if c not in ('instrument',)]
     model_features = [c for c in feature_cols if c not in ('instrument',)]
 
     # 标准化

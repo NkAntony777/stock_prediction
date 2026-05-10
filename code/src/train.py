@@ -16,16 +16,13 @@ import os
 import json
 import multiprocessing as mp
 import random
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
 
+# [Phase 1优化] AMP混合精度训练导入
+from torch.cuda.amp import autocast, GradScaler
+
+
+def set_seed(seed=42):
+    pass  # 设置随机种子
 feature_cloums_map = {
     '39': ['instrument','开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅','sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv','volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std', 'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',  'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'],
 
@@ -305,82 +302,153 @@ def collate_fn(batch):
     }
 
 # 排序训练函数
-def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, writer):
+# 排序训练函数 - [Phase 1优化] 添加AMP混合精度和梯度累积
+def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, writer, scaler=None, accumulation_steps=1):
+    """
+    训练排序模型，支持AMP混合精度和梯度累积
+    
+    Args:
+        model: 模型
+        dataloader: 数据加载器
+        criterion: 损失函数
+        optimizer: 优化器
+        device: 设备
+        epoch: 当前epoch
+        writer: tensorboard writer
+        scaler: GradScaler for AMP, optional
+        accumulation_steps: 梯度累积步数
+    """
     model.train()
     total_loss = 0
     total_metrics = {}
-    local_step = 0
+    num_batches = 0
     
-    for batch in tqdm(dataloader, desc=f"Training Epoch {epoch+1}"):
-        sequences = batch['sequences'].to(device)    # [batch, max_stocks, seq_len, features]
-        targets = batch['targets'].to(device)        # [batch, max_stocks] 真实涨跌幅
-        relevance = batch['relevance'].to(device)    # [batch, max_stocks] 预处理的相关性得分
-        masks = batch['masks'].to(device)            # [batch, max_stocks] 有效位置mask
+    # 用于梯度累积
+    accumulation_loss = None
+    
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Training Epoch {epoch+1}")):
+        sequences = batch['sequences'].to(device)
+        targets = batch['targets'].to(device)
+        masks = batch['masks'].to(device)
         
-        optimizer.zero_grad()
-        
-        # 模型预测
-        outputs = model(sequences)  # [batch, max_stocks] 预测分数
-        
-        # 应用mask，只考虑有效股票
-        masked_outputs = outputs * masks + (1 - masks) * (-1e9)  # 无效位置设为很小的值
-        masked_targets = targets * masks
-        masked_relevance = relevance.float() * masks  # 使用预处理好的相关性得分
-        
-        # 计算损失（只对有效股票计算）
-        batch_loss = None
-        batch_size = sequences.size(0)
-        
-        for i in range(batch_size):
-            mask = masks[i]
-            valid_indices = mask.nonzero().squeeze()
+        # [Phase 1优化] 使用 autocast 启用混合精度训练
+        with autocast(enabled=scaler is not None):
+            # 模型预测
+            outputs = model(sequences)  # [batch, num_stocks]
             
-            if valid_indices.numel() == 0:
-                continue
+            # 应用mask
+            masked_outputs = outputs * masks + (1 - masks) * (-1e9)
+            masked_targets = targets * masks
+            
+            # 计算损失
+            batch_loss = None
+            batch_size = sequences.size(0)
+            
+            for i in range(batch_size):
+                mask = masks[i]
+                valid_indices = mask.nonzero().squeeze()
                 
-            if valid_indices.dim() == 0:
-                valid_indices = valid_indices.unsqueeze(0)
+                if valid_indices.numel() == 0:
+                    continue
+                
+                if valid_indices.dim() == 0:
+                    valid_indices = valid_indices.unsqueeze(0)
+                
+                valid_pred = masked_outputs[i][valid_indices]
+                valid_true = masked_targets[i][valid_indices]
+                
+                if len(valid_pred) > 1:
+                    _, sorted_indices = torch.sort(valid_true, descending=True)
+                    relevance_scores = torch.zeros_like(valid_true, requires_grad=False)
+                    relevance_scores[sorted_indices] = torch.arange(len(valid_true), 0, -1, device=device, dtype=torch.float32)
+                    
+                    loss = criterion(valid_pred.unsqueeze(0), relevance_scores.unsqueeze(0))
+                    batch_loss = batch_loss + loss if batch_loss is not None else loss
             
-            # 获取有效股票的预测值和预处理好的相关性得分
-            valid_pred = masked_outputs[i][valid_indices]
-            valid_relevance = masked_relevance[i][valid_indices]
-            
-            if len(valid_pred) > 1:
-                # 直接使用预处理好的相关性得分，无需重新计算
-                loss = criterion(valid_pred.unsqueeze(0), valid_relevance.unsqueeze(0))
-                batch_loss = batch_loss + loss if isinstance(batch_loss, torch.Tensor) else loss
+            if batch_loss is not None:
+                batch_loss = batch_loss / batch_size
         
-        if batch_loss is not None:
-            batch_loss = batch_loss / batch_size
-            batch_loss.backward()
-            if not config.get('drop_clip', True):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
-                if writer:
-                    writer.add_scalar('train/grad_norm', grad_norm, global_step=epoch*len(dataloader)+local_step)
-            optimizer.step()
+        # [Phase 1优化] 梯度累积 - 损失累积
+        if accumulation_steps > 1:
+            batch_loss = batch_loss / accumulation_steps
+            if accumulation_loss is None:
+                accumulation_loss = batch_loss
+            else:
+                accumulation_loss = accumulation_loss + batch_loss
+        else:
+            accumulation_loss = batch_loss
+        
+# [Phase 1优化] 梯度累积 - 每 accumulation_steps 步更新一次
+        if (batch_idx + 1) % accumulation_steps == 0:
+            if scaler is not None:
+                # 使用 GradScaler 进行反向传播
+                scaler.scale(accumulation_loss).backward()
+                
+                # 梯度裁剪
+                if config.get('max_grad_norm', 5.0) > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+                
+                # 更新参数
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # 普通反向传播
+                accumulation_loss.backward()
+                
+                # 梯度裁剪
+                if config.get('max_grad_norm', 5.0) > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+                
+                # 更新参数
+                optimizer.step()
+                optimizer.zero_grad()
             
+            # 重置累积损失
+            accumulation_loss = None
+        # 记录损失
+        if accumulation_loss is not None and accumulation_loss.numel() == 1:
+            total_loss += accumulation_loss.item()
+        elif batch_loss is not None:
             total_loss += batch_loss.item()
-            
-            # 计算评估指标
-            with torch.no_grad():
-                metrics = calculate_ranking_metrics(masked_outputs, masked_targets, masks, k=5)
-                for k, v in metrics.items():
-                    if k not in total_metrics:
-                        total_metrics[k] = 0
-                    total_metrics[k] += v
-            
-            local_step += 1
-            if writer:
-                writer.add_scalar('train/loss', batch_loss.item(), global_step=epoch*len(dataloader)+local_step)
-                for k, v in metrics.items():
-                    writer.add_scalar(f'train/{k}', v, global_step=epoch*len(dataloader)+local_step)
+        
+        # 计算评估指标
+        with torch.no_grad():
+            metrics = calculate_ranking_metrics(masked_outputs, masked_targets, masks, k=5)
+            for k, v in metrics.items():
+                if k not in total_metrics:
+                    total_metrics[k] = 0
+                total_metrics[k] += v
+        num_batches += 1
+    
+    # 处理最后不足 accumulation_steps 的 batches
+    if accumulation_loss is not None:
+        if scaler is not None:
+            scaler.scale(accumulation_loss).backward()
+            if config.get('max_grad_norm', 5.0) > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            accumulation_loss.backward()
+            if config.get('max_grad_norm', 5.0) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
+            optimizer.step()
+        optimizer.zero_grad()
     
     # 计算平均指标
-    if local_step > 0:
-        for k in total_metrics:
-            total_metrics[k] /= local_step
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0
+    for k in total_metrics:
+        total_metrics[k] /= num_batches
     
-    return total_loss / len(dataloader) if len(dataloader) > 0 else 0, total_metrics
+    if writer:
+        writer.add_scalar('train/loss', avg_loss, global_step=epoch)
+        for k, v in total_metrics.items():
+            writer.add_scalar(f'train/{k}', v, global_step=epoch)
+    
+    return avg_loss, total_metrics
+
 
 def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
     model.eval()
@@ -645,8 +713,14 @@ def main():
         pairwise_weight=config['pairwise_weight'],
         base_weight=config.get('base_weight', 1.0)
     )  # 使用加权排序损失
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.2, total_iters=config['num_epochs'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config.get('weight_decay', 2e-5))
+    # [改进] 使用CosineAnnealingLR替代LinearLR
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['num_epochs'], eta_min=config['learning_rate']*0.05)
+
+    
+    # [Phase 1优化] 初始化AMP GradScaler
+    scaler = GradScaler() if config.get('use_amp', True) and device.type == 'cuda' else None
+    accumulation_steps = config.get('accumulation_steps', 1)
     
     # 8. 排序模型训练
     if is_train:
@@ -658,7 +732,8 @@ def main():
             
             # 训练
             train_loss, train_metrics = train_ranking_model(
-                model, train_loader, criterion, optimizer, device, epoch, writer
+                model, train_loader, criterion, optimizer, device, epoch, writer,
+                scaler=scaler, accumulation_steps=accumulation_steps
             )
             
             print(f"Train Loss: {train_loss:.4f}")
